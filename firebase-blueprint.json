@@ -1,0 +1,85 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User account information, wallet balance, and plan",
+      "type": "object",
+      "properties": {
+        "username": {
+          "type": "string",
+          "description": "User display name",
+          "maxLength": 64
+        },
+        "email": {
+          "type": "string",
+          "description": "User email address",
+          "maxLength": 128
+        },
+        "plan": {
+          "type": "string",
+          "description": "Plan tier (free or pro)",
+          "enum": ["free", "pro"]
+        },
+        "coins": {
+          "type": "number",
+          "description": "User coin balance"
+        },
+        "botSlotsUsed": {
+          "type": "number",
+          "description": "Number of deployed bot slots in use"
+        },
+        "botSlotsTotal": {
+          "type": "number",
+          "description": "Total allowed bot slots"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp of creation"
+        }
+      },
+      "required": ["username", "email", "plan", "coins"]
+    },
+    "BotEntity": {
+      "title": "BotEntity",
+      "description": "Deployed bot instance metadata and configuration",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Bot instance name",
+          "maxLength": 64
+        },
+        "templateName": {
+          "type": "string",
+          "description": "Template name",
+          "maxLength": 64
+        },
+        "status": {
+          "type": "string",
+          "description": "Current bot container status",
+          "enum": ["running", "stopped", "rebuilding", "deploying"]
+        },
+        "phoneNumber": {
+          "type": "string",
+          "description": "Paired WhatsApp phone number",
+          "maxLength": 32
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp"
+        }
+      },
+      "required": ["name", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Stores individual user account profile and wallet data"
+    },
+    "/users/{userId}/bots/{botId}": {
+      "schema": "BotEntity",
+      "description": "Stores user bot deployments"
+    }
+  }
+}

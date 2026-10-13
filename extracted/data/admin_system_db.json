@@ -1,0 +1,277 @@
+{
+  "customers": {
+    "user-sawrikasuraj": {
+      "id": "user-sawrikasuraj",
+      "email": "sawrikasuraj759@gmail.com",
+      "username": "Sawrika Suraj",
+      "plan": "business",
+      "coins": 500,
+      "isSuspended": false,
+      "botStatus": "online",
+      "createdAt": "2026-09-12T17:11:35.255Z",
+      "lastActive": "2026-10-12T17:27:14.569Z",
+      "adminNote": "Master Administrator & Owner Account",
+      "mediaUsed": 12,
+      "aiUsed": 45
+    },
+    "test-cust-1": {
+      "id": "test-cust-1",
+      "email": "testuser@gmail.com",
+      "username": "Test Customer",
+      "plan": "pro",
+      "coins": 10,
+      "isSuspended": false,
+      "botStatus": "none",
+      "createdAt": "2026-10-12T17:11:49.041Z",
+      "lastActive": "2026-10-12T17:11:49.041Z",
+      "mediaUsed": 0,
+      "aiUsed": 0
+    },
+    "7zFocHk75ySOsdmGHMmfnaktyhr2": {
+      "id": "7zFocHk75ySOsdmGHMmfnaktyhr2",
+      "email": "sawwa2231@gmail.com",
+      "username": "Leader Account",
+      "plan": "mini",
+      "coins": 10,
+      "isSuspended": false,
+      "botStatus": "none",
+      "createdAt": "2026-10-12T17:30:11.143Z",
+      "lastActive": "2026-10-12T17:30:11.143Z",
+      "mediaUsed": 0,
+      "aiUsed": 0
+    }
+  },
+  "purchaseRequests": [
+    {
+      "customerId": "7zFocHk75ySOsdmGHMmfnaktyhr2",
+      "customerEmail": "sawwa2231@gmail.com",
+      "customerName": "Leader Account",
+      "itemType": "plan",
+      "itemName": "YASHI HALLS YASHI HALLS BUSINESS",
+      "planId": "business",
+      "priceLkr": 2400,
+      "priceFormatted": "Rs 2,400",
+      "id": "req-1791826211143",
+      "referenceId": "REQ-211143-FFQ",
+      "status": "PENDING",
+      "createdAt": "2026-10-12T17:30:11.143Z"
+    },
+    {
+      "customerId": "G0h0mkhFgUXhHNOwsI5DYPQTTaX2",
+      "customerEmail": "sawrikasuraj759@gmail.com",
+      "customerName": "Sawrika Suraj",
+      "itemType": "plan",
+      "itemName": "YASHI HALLS YASHI HALLS BUSINESS",
+      "planId": "business",
+      "priceLkr": 2400,
+      "priceFormatted": "Rs 2,400",
+      "id": "req-1791826034569",
+      "referenceId": "REQ-034569-21N",
+      "status": "PENDING",
+      "createdAt": "2026-10-12T17:27:14.569Z"
+    },
+    {
+      "customerId": "G0h0mkhFgUXhHNOwsI5DYPQTTaX2",
+      "customerEmail": "sawrikasuraj759@gmail.com",
+      "customerName": "Sawrika Suraj",
+      "itemType": "plan",
+      "itemName": "YASHI HALLS YASHI HALLS BUSINESS",
+      "planId": "business",
+      "priceLkr": 2400,
+      "priceFormatted": "Rs 2,400",
+      "id": "req-1791825989643",
+      "referenceId": "REQ-989643-09H",
+      "status": "PENDING",
+      "createdAt": "2026-10-12T17:26:29.643Z"
+    },
+    {
+      "customerId": "test-cust-1",
+      "customerEmail": "testuser@gmail.com",
+      "customerName": "Test Customer",
+      "itemType": "plan",
+      "itemName": "YASHI HALLS PRO Plan",
+      "planId": "pro",
+      "priceLkr": 900,
+      "priceFormatted": "Rs 900",
+      "id": "req-1791825109040",
+      "referenceId": "REQ-109040-L59",
+      "status": "FULFILLED",
+      "createdAt": "2026-10-12T17:11:49.040Z",
+      "updatedAt": "2026-10-12T17:12:01.307Z",
+      "fulfilledBy": "sawrikasuraj759@gmail.com",
+      "adminNote": "Verified bank slip via WhatsApp"
+    }
+  ],
+  "auditLogs": [
+    {
+      "id": "audit-1791826529134-zgk",
+      "timestamp": "2026-10-12T17:35:29.134Z",
+      "adminEmail": "sawrikasuraj759@gmail.com",
+      "action": "DELETE_VOICE_REPLY",
+      "details": "Deleted voice reply 'Custom Admin Greeting MP3'",
+      "targetId": "voice-1791826478141-5tns"
+    },
+    {
+      "id": "audit-1791826515411-nsp",
+      "timestamp": "2026-10-12T17:35:15.411Z",
+      "adminEmail": "anonymous",
+      "action": "UNAUTHORIZED_ADMIN_ATTEMPT",
+      "details": "Blocked attempt to access GET /api/admin/voice-replies from IP 127.0.0.1"
+    },
+    {
+      "id": "audit-1791826478179-452",
+      "timestamp": "2026-10-12T17:34:38.179Z",
+      "adminEmail": "sawrikasuraj759@gmail.com",
+      "action": "TOGGLE_VOICE_REPLY",
+      "details": "Enabled voice auto-reply 'Custom Admin Greeting MP3'",
+      "targetId": "voice-1791826478141-5tns"
+    },
+    {
+      "id": "audit-1791826478164-jry",
+      "timestamp": "2026-10-12T17:34:38.164Z",
+      "adminEmail": "sawrikasuraj759@gmail.com",
+      "action": "TOGGLE_VOICE_REPLY",
+      "details": "Disabled voice auto-reply 'Custom Admin Greeting MP3'",
+      "targetId": "voice-1791826478141-5tns"
+    },
+    {
+      "id": "audit-1791826478142-azg",
+      "timestamp": "2026-10-12T17:34:38.142Z",
+      "adminEmail": "sawrikasuraj759@gmail.com",
+      "action": "CREATE_VOICE_REPLY",
+      "details": "Created voice reply 'Custom Admin Greeting MP3' with triggers: custom hi, custom hello, සුවිශේෂී හායි",
+      "targetId": "voice-1791826478141-5tns"
+    },
+    {
+      "id": "audit-1791825121307-cke",
+      "timestamp": "2026-10-12T17:12:01.307Z",
+      "adminEmail": "sawrikasuraj759@gmail.com",
+      "action": "APPROVE_PURCHASE",
+      "details": "Approved and fulfilled YASHI HALLS PRO Plan (Ref: REQ-109040-L59) for testuser@gmail.com",
+      "targetId": "req-1791825109040"
+    },
+    {
+      "id": "audit-1791825108985-0qb",
+      "timestamp": "2026-10-12T17:11:48.985Z",
+      "adminEmail": "random@gmail.com",
+      "action": "UNAUTHORIZED_ADMIN_ATTEMPT",
+      "details": "Blocked attempt to access GET /api/admin/overview from IP 127.0.0.1"
+    },
+    {
+      "id": "audit-1791825095255",
+      "timestamp": "2026-10-12T17:11:35.255Z",
+      "adminEmail": "system",
+      "action": "SYSTEM_BOOT",
+      "details": "YASHI HALLS Admin Engine & Manual Purchase Management System initialised."
+    }
+  ],
+  "settings": {
+    "storeName": "YASHI HALLS Cloud Platform",
+    "brandTagline": "Professional Cyber Multi-Device WhatsApp Engine",
+    "adminWhatsapp": "0740712934",
+    "maintenanceMode": false,
+    "allowPublicSignups": true,
+    "planPricesCoins": {
+      "mini": 0,
+      "pro": 10,
+      "business": 30
+    },
+    "coinPackPricesLkr": {
+      "basic": 450,
+      "popular": 1200,
+      "mega": 2800
+    }
+  },
+  "voiceReplies": [
+    {
+      "id": "voice-greeting-hi",
+      "name": "Welcome & Greeting Voice (හායි / Hello)",
+      "triggers": [
+        "hi",
+        "hello",
+        "හායි",
+        "hey",
+        "hello yashi"
+      ],
+      "audioFileName": "seed_hi.mp3",
+      "audioPath": "/app/applet/data/voice_replies/seed_hi.mp3",
+      "audioUrl": "/api/voice-replies/audio/voice-greeting-hi",
+      "mimeType": "audio/mpeg",
+      "fileSizeBytes": 12582,
+      "fileSizeFormatted": "12.3 KB",
+      "durationSeconds": 2,
+      "language": "Both",
+      "enabled": true,
+      "scope": "GLOBAL",
+      "createdAt": "2026-10-12T17:34:18.575Z",
+      "playCount": 14
+    },
+    {
+      "id": "voice-morning-greeting",
+      "name": "Morning Greeting Voice (සුබ උදෑසනක්)",
+      "triggers": [
+        "good morning",
+        "සුබ උදෑසනක්",
+        "morning",
+        "gm"
+      ],
+      "audioFileName": "seed_good_morning.mp3",
+      "audioPath": "/app/applet/data/voice_replies/seed_good_morning.mp3",
+      "audioUrl": "/api/voice-replies/audio/voice-morning-greeting",
+      "mimeType": "audio/mpeg",
+      "fileSizeBytes": 15400,
+      "fileSizeFormatted": "15.0 KB",
+      "durationSeconds": 2,
+      "language": "Both",
+      "enabled": true,
+      "scope": "GLOBAL",
+      "createdAt": "2026-10-12T17:34:18.575Z",
+      "playCount": 8
+    },
+    {
+      "id": "voice-night-greeting",
+      "name": "Good Night Voice (සුබ රාත්‍රියක්)",
+      "triggers": [
+        "good night",
+        "සුබ රාත්‍රියක්",
+        "gn",
+        "sweet dreams"
+      ],
+      "audioFileName": "seed_good_night.mp3",
+      "audioPath": "/app/applet/data/voice_replies/seed_good_night.mp3",
+      "audioUrl": "/api/voice-replies/audio/voice-night-greeting",
+      "mimeType": "audio/mpeg",
+      "fileSizeBytes": 14200,
+      "fileSizeFormatted": "13.9 KB",
+      "durationSeconds": 2,
+      "language": "Both",
+      "enabled": true,
+      "scope": "GLOBAL",
+      "createdAt": "2026-10-12T17:34:18.575Z",
+      "playCount": 5
+    },
+    {
+      "id": "voice-how-are-you",
+      "name": "How Are You Voice (කොහොමද / How Are You)",
+      "triggers": [
+        "how are you",
+        "කොහොමද",
+        "how r u",
+        "සැප සනීප කොහොමද"
+      ],
+      "audioFileName": "seed_how_are_you.mp3",
+      "audioPath": "/app/applet/data/voice_replies/seed_how_are_you.mp3",
+      "audioUrl": "/api/voice-replies/audio/voice-how-are-you",
+      "mimeType": "audio/mpeg",
+      "fileSizeBytes": 13800,
+      "fileSizeFormatted": "13.5 KB",
+      "durationSeconds": 2,
+      "language": "Both",
+      "enabled": true,
+      "scope": "GLOBAL",
+      "createdAt": "2026-10-12T17:34:18.575Z",
+      "playCount": 11
+    }
+  ],
+  "walletTransactions": []
+}

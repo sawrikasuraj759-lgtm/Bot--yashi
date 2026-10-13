@@ -1,0 +1,6 @@
+{
+  "name": "StianHost - Cloud Bot Hosting",
+  "description": "Free 24/7 cloud bot hosting platform with real-time deployment management, coin wallet, and instant bot templates.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

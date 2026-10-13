@@ -1,0 +1,35 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && 
+        request.auth.token.email != null && 
+        request.auth.token.email.lower() == 'sawrikasuraj759@gmail.com';
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow write: if isOwner(userId) || isAdmin();
+
+      // User deployed bots subcollection
+      match /bots/{botId} {
+        allow read, write: if isOwner(userId) || isAdmin();
+      }
+    }
+
+    // Purchase requests collection
+    match /purchase_requests/{reqId} {
+      allow read, write: if isSignedIn();
+    }
+  }
+}
+
