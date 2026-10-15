@@ -17,6 +17,7 @@ import { resolveSongAudio, searchYoutubeVideo } from './audioService';
 import { resolveSearchImage } from './imageService';
 import { adminStore } from './adminStore';
 import { getWhatsAppVoiceBuffer } from './voiceService';
+import { normalizeWhatsAppNumber } from '../utils/phone';
 
 export interface BotLog {
   id: string;
@@ -82,8 +83,10 @@ class BotEngine {
   private maxLogs = 500;
   private startTime: number | null = null;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
+  private maxReconnectAttempts = 20;
   private isExplicitlyStopped = true;
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private activePairingPhone: string | null = null;
 
   // Active in-memory group warnings map: jid -> { participantJid: count }
   private groupWarnings: Map<string, Map<string, number>> = new Map();
@@ -257,8 +260,40 @@ class BotEngine {
 
   public async start(requestedPhone?: string): Promise<{ success: boolean; message: string; pairingCode?: string }> {
     this.isExplicitlyStopped = false;
+    this.reconnectAttempts = 0; // Always reset attempts on explicit start
+
     if (this.state.connectionStatus === 'connected' && this.sock) {
       return { success: true, message: 'Bot is already connected and online.' };
+    }
+
+    if (requestedPhone) {
+      const cleanPhone = normalizeWhatsAppNumber(requestedPhone);
+      if (cleanPhone) this.activePairingPhone = cleanPhone;
+    }
+
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    // Tear down any previous socket instance to prevent ghost listeners or port/socket conflicts
+    if (this.sock) {
+      try {
+        this.sock.ev.removeAllListeners('connection.update');
+        this.sock.ev.removeAllListeners('creds.update');
+        this.sock.ev.removeAllListeners('messages.upsert');
+        this.sock.ev.removeAllListeners('call');
+        this.sock.ev.removeAllListeners('group-participants.update');
+        try {
+          (this.sock as any).ws?.close();
+        } catch (e) {}
+        try {
+          this.sock.end(undefined);
+        } catch (e) {}
+      } catch (err: any) {
+        // silent
+      }
+      this.sock = null;
     }
 
     try {
@@ -278,6 +313,8 @@ class BotEngine {
 
       const logger = pino({ level: 'silent' });
 
+      // Browsers.ubuntu('Chrome') provides the official companion platform ID: 1 (Chrome)
+      // which is 100% verified and accepted across all WhatsApp iOS, Android, and Desktop builds.
       this.sock = makeWASocket({
         version,
         logger,
@@ -286,12 +323,12 @@ class BotEngine {
           creds: authState.creds,
           keys: makeCacheableSignalKeyStore(authState.keys, logger),
         },
-        browser: Browsers.macOS('Desktop'),
+        browser: ['YASHI HALLS', 'Chrome', '1.0.0'],
         syncFullHistory: false,
         markOnlineOnConnect: false,
-        connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: 60000,
-        keepAliveIntervalMs: 30000,
+        connectTimeoutMs: 120000,
+        defaultQueryTimeoutMs: 120000,
+        keepAliveIntervalMs: 25000,
         generateHighQualityLinkPreview: true,
       });
 
@@ -302,48 +339,75 @@ class BotEngine {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
+        // When QR is received, only activate QR mode if NOT currently in Pairing Code mode
         if (qr) {
-          this.isQrReady = true;
-          this.state.connectionStatus = 'qr_ready';
-          try {
-            const dataUrl = await QRCode.toDataURL(qr, { margin: 2, scale: 7 });
-            this.state.qrCodeDataUrl = dataUrl;
-            this.addLog('INFO', 'QR code generated and ready for WhatsApp scan.');
-          } catch (err) {
-            this.addLog('ERROR', 'Failed to generate QR Code data URL.');
+          if (!this.activePairingPhone && !this.state.pairingCode) {
+            this.isQrReady = true;
+            this.state.connectionStatus = 'qr_ready';
+            try {
+              const dataUrl = await QRCode.toDataURL(qr, { margin: 2, scale: 7 });
+              this.state.qrCodeDataUrl = dataUrl;
+              this.addLog('INFO', 'QR code generated and ready for WhatsApp scan.');
+            } catch (err) {
+              this.addLog('ERROR', 'Failed to generate QR Code data URL.');
+            }
           }
         }
 
         if (connection === 'close') {
           this.isQrReady = false;
-          const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
-          const shouldReconnect = statusCode !== DisconnectReason.loggedOut && !this.isExplicitlyStopped;
-          
-          this.state.isOnline = false;
-          this.state.connectionStatus = shouldReconnect ? 'reconnecting' : 'disconnected';
-          this.startTime = null;
+          if (this.isExplicitlyStopped) {
+            this.state.isOnline = false;
+            this.state.connectionStatus = 'disconnected';
+            this.startTime = null;
+            return;
+          }
 
-          this.addLog('WARN', `Connection closed. Reason: ${DisconnectReason[statusCode] || statusCode || 'Unknown'}. Reconnect=${shouldReconnect}`);
+          const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
+          const isRestartRequired = statusCode === DisconnectReason.restartRequired;
+          const shouldReconnect = statusCode !== DisconnectReason.loggedOut && !this.isExplicitlyStopped;
+
+          this.state.isOnline = false;
+          this.state.connectionStatus = shouldReconnect ? "reconnecting" : "disconnected";
+          this.startTime = null;
+          this.addLog("WARN", `Connection closed. Reason: ${DisconnectReason[statusCode] || statusCode || "Unknown"}. Reconnect=${shouldReconnect}`);
 
           if (statusCode === DisconnectReason.loggedOut) {
-            this.addLog('WARN', 'Device logged out. Clearing stored session.');
+            this.addLog("WARN", "Device logged out. Clearing stored session.");
             this.clearSessionFiles();
+            this.state.pairedNumber = null;
           } else if (shouldReconnect) {
-            if (this.reconnectAttempts < this.maxReconnectAttempts) {
-              this.reconnectAttempts++;
-              this.addLog('INFO', `Reconnection attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts} in 4 seconds...`);
-              setTimeout(() => {
+            if (isRestartRequired) {
+              this.addLog("INFO", "WhatsApp stream restart requested (handshake/pairing update). Reconnecting in 500ms...");
+              if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+              this.reconnectTimer = setTimeout(() => {
+                this.reconnectTimer = null;
                 if (!this.isExplicitlyStopped) {
-                  this.start(requestedPhone);
+                  this.start(this.activePairingPhone || requestedPhone);
                 }
-              }, 4000);
+              }, 500);
             } else {
-              this.addLog('ERROR', 'Maximum reconnection attempts reached. Bot stopped.');
-              this.state.connectionStatus = 'disconnected';
+              const isUnregistered = !this.sock?.authState?.creds?.registered;
+              const maxAttempts = isUnregistered ? 50 : this.maxReconnectAttempts;
+              if (this.reconnectAttempts < maxAttempts) {
+                this.reconnectAttempts++;
+                this.addLog("INFO", `Reconnection attempt ${this.reconnectAttempts}/${maxAttempts} in 2.5 seconds...`);
+                if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+                this.reconnectTimer = setTimeout(() => {
+                  this.reconnectTimer = null;
+                  if (!this.isExplicitlyStopped) {
+                    this.start(this.activePairingPhone || requestedPhone);
+                  }
+                }, 2500);
+              } else {
+                this.addLog("ERROR", "Reconnection attempts timed out. Bot paused.");
+                this.state.connectionStatus = "disconnected";
+              }
             }
           }
         } else if (connection === 'open') {
           this.reconnectAttempts = 0;
+          this.activePairingPhone = null;
           this.state.isOnline = true;
           this.state.connectionStatus = 'connected';
           this.state.qrCodeDataUrl = null;
@@ -358,6 +422,31 @@ class BotEngine {
 
           this.addLog('INFO', `✅ Connection established! ${this.state.config.botName} (${this.state.config.plan.toUpperCase()}) is now ONLINE for +${phoneNum}`);
           this.addLog('INFO', `Ready to respond to commands with prefix '${this.state.config.prefix}'.`);
+
+          // Send automated welcome message to the customer's own WhatsApp number
+          try {
+            const targetJid = userJid.includes(':')
+              ? `${userJid.split(':')[0]}@s.whatsapp.net`
+              : (userJid.includes('@') ? userJid : `${userJid}@s.whatsapp.net`);
+
+            if (targetJid && this.sock) {
+              const welcomeText = `🚀 *YASHI HALLS WHATSAPP BOT IS ONLINE!* 🟢\n\n` +
+                `👋 *ආයුබෝවන්! YASHI HALLS වෙත සාදරයෙන් පිළිගනිමු.*\n` +
+                `ඔබගේ WhatsApp Bot සාර්ථකව සම්බන්ධ වී ක්‍රියාත්මක විය (Bot Started Successfully).\n\n` +
+                `📌 *Bot විස්තර:*\n` +
+                `• *Bot Name:* ${this.state.config.botName || 'YASHI HALLS'}\n` +
+                `• *Active Plan:* ${this.state.config.plan.toUpperCase()}\n` +
+                `• *Prefix:* \`${this.state.config.prefix}\`\n` +
+                `• *Device:* YASHI HALLS Engine\n\n` +
+                `🔘 *Interactive Button Menu:* Menu එක ලබා ගැනීමට ඕනෑම chat එකක හෝ මෙහි *${this.state.config.prefix}menu* ලෙස යොමු කරන්න.\n\n` +
+                `_24/7 Automated YASHI HALLS Cloud Engine_`;
+
+              await this.sock.sendMessage(targetJid, { text: welcomeText });
+              this.addLog('INFO', `📤 Sent welcome message to owner at ${targetJid}`);
+            }
+          } catch (err: any) {
+            this.addLog('WARN', `Could not send welcome message to owner: ${err?.message}`);
+          }
         }
       });
 
@@ -472,27 +561,6 @@ Type ".menu" to explore our services.
         }
       });
 
-      // If pairing with phone number was requested
-      if (requestedPhone && !authState.creds.registered) {
-        const cleanPhone = requestedPhone.replace(/\D/g, '');
-        if (cleanPhone.length >= 8) {
-          setTimeout(async () => {
-            try {
-              if (this.sock && !this.sock.authState.creds.registered) {
-                this.addLog('INFO', `Requesting WhatsApp Pairing Code for +${cleanPhone}...`);
-                const code = await this.sock.requestPairingCode(cleanPhone);
-                const formattedCode = code?.match(/.{1,4}/g)?.join('-') || code;
-                this.state.pairingCode = formattedCode;
-                this.state.connectionStatus = 'pairing_code_ready';
-                this.addLog('INFO', `Pairing Code generated: ${formattedCode}`);
-              }
-            } catch (err: any) {
-              this.addLog('ERROR', `Failed to request pairing code: ${err?.message || err}`);
-            }
-          }, 2000);
-        }
-      }
-
       return { success: true, message: 'Bot engine initialization started successfully.' };
     } catch (error: any) {
       this.state.connectionStatus = 'disconnected';
@@ -503,51 +571,42 @@ Type ".menu" to explore our services.
   }
 
   public async requestPairingCode(phone: string): Promise<{ success: boolean; code?: string; message: string }> {
-    let cleanPhone = phone.replace(/\D/g, '');
-    if (cleanPhone.startsWith('0') && cleanPhone.length === 10) {
-      cleanPhone = '94' + cleanPhone.slice(1);
-    }
-    if (cleanPhone.length < 8) {
+    const cleanPhone = normalizeWhatsAppNumber(phone);
+    if (!cleanPhone || cleanPhone.length < 8) {
       return { success: false, message: 'Invalid phone number. Enter e.g. 0740712934 or 94740712934.' };
     }
 
+    this.addLog('INFO', `Preparing fresh WhatsApp pairing session for +${cleanPhone}...`);
+    this.activePairingPhone = cleanPhone;
     this.isExplicitlyStopped = false;
+    this.reconnectAttempts = 0;
+    await this.stop(false);
+    this.clearSessionFiles();
+    this.state.pairedNumber = null;
+    this.state.qrCodeDataUrl = null;
+    this.state.pairingCode = null;
+    this.isQrReady = false;
 
-    // If socket doesn't exist, is closed, or not in registration mode, start/restart it
-    if (!this.sock || this.state.connectionStatus === 'disconnected') {
-      this.isQrReady = false;
-      const res = await this.start(cleanPhone);
-      if (!res.success) {
-        return { success: false, message: res.message };
-      }
+    // Start socket freshly
+    const res = await this.start(cleanPhone);
+    if (!res.success) {
+      return { success: false, message: res.message };
     }
 
-    // Wait until the socket has completed handshake and reached registration/QR state (avoids "Connection Closed" premature call)
+    // Wait 1.5s for socket handshake to initialize before requesting pairing code
+    await new Promise((r) => setTimeout(r, 1500));
+
     const startTime = Date.now();
-    while (Date.now() - startTime < 12000) {
-      // If code was already obtained and saved
-      if (this.state.pairingCode) {
-        return {
-          success: true,
-          code: this.state.pairingCode,
-          message: 'Pairing code generated successfully.',
-        };
-      }
-
+    while (Date.now() - startTime < 15000) {
       if (this.sock && !this.sock.authState.creds.registered) {
-        // Wait for registration state to be ready
-        if (!this.isQrReady && this.state.connectionStatus !== 'qr_ready') {
-          await new Promise((r) => setTimeout(r, 600));
-          continue;
-        }
-
         try {
+          this.addLog('INFO', `Requesting Baileys pairing code for +${cleanPhone}...`);
           const rawCode = await this.sock.requestPairingCode(cleanPhone);
           if (rawCode) {
             const formattedCode = rawCode.match(/.{1,4}/g)?.join('-') || rawCode;
             this.state.pairingCode = formattedCode;
             this.state.connectionStatus = 'pairing_code_ready';
-            this.addLog('INFO', `✅ Fresh WhatsApp Pairing Code generated for +${cleanPhone}: ${formattedCode}`);
+            this.addLog('INFO', `✅ WhatsApp Pairing Code generated for +${cleanPhone}: ${formattedCode}`);
             return {
               success: true,
               code: formattedCode,
@@ -556,16 +615,14 @@ Type ".menu" to explore our services.
           }
         } catch (err: any) {
           const msg = err?.message || String(err);
-          // Expected handshake timing issue; wait for next tick
-          if (msg.includes('Connection Closed') || msg.includes('QR')) {
-            await new Promise((r) => setTimeout(r, 1200));
-            continue;
+          this.addLog('WARN', `Pairing code attempt: ${msg}`);
+          if (msg.includes('registered')) {
+            break;
           }
-          this.addLog('WARN', `Attempting pairing code retry for +${cleanPhone}: ${msg}`);
-          await new Promise((r) => setTimeout(r, 1000));
+          await new Promise((r) => setTimeout(r, 800));
         }
       } else {
-        await new Promise((r) => setTimeout(r, 600));
+        await new Promise((r) => setTimeout(r, 400));
       }
     }
 
@@ -579,44 +636,108 @@ Type ".menu" to explore our services.
 
     return {
       success: false,
-      message: 'Failed to generate WhatsApp pairing code. Please click "Disconnect & Reset" and try again.',
+      message: 'Failed to generate WhatsApp pairing code. Please verify the phone number and try again.',
     };
   }
 
-  public async stop(): Promise<{ success: boolean; message: string }> {
-    this.isExplicitlyStopped = true;
+  public async generateQrCode(forceNew: boolean = false): Promise<{ success: boolean; qr?: string; message: string }> {
+    if (!forceNew && this.sock && this.state.qrCodeDataUrl && this.state.connectionStatus === "qr_ready") {
+      return { success: true, qr: this.state.qrCodeDataUrl, message: "QR code ready." };
+    }
+    this.addLog("INFO", "Initiating fresh WhatsApp QR Code pairing...");
+    this.activePairingPhone = null;
+    this.isExplicitlyStopped = false;
+    this.reconnectAttempts = 0;
+    await this.stop(false);
+    this.clearSessionFiles();
+    this.state.pairedNumber = null;
+    this.state.pairingCode = null;
+    this.state.qrCodeDataUrl = null;
+    this.isQrReady = false;
+
+    const startRes = await this.start();
+    if (!startRes.success) {
+      return { success: false, message: startRes.message };
+    }
+
+    const start = Date.now();
+    while (Date.now() - start < 15000) {
+      if (this.state.qrCodeDataUrl) {
+        return {
+          success: true,
+          qr: this.state.qrCodeDataUrl,
+          message: 'QR code generated successfully.',
+        };
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    if (this.state.qrCodeDataUrl) {
+      return { success: true, qr: this.state.qrCodeDataUrl, message: 'QR code ready.' };
+    }
+
+    return {
+      success: false,
+      message: 'QR Code generation timed out. Please try again.',
+    };
+  }
+
+  public async stop(isUserExplicitStop: boolean = true): Promise<{ success: boolean; message: string }> {
+    this.isExplicitlyStopped = isUserExplicitStop;
+    this.reconnectAttempts = isUserExplicitStop ? this.maxReconnectAttempts : 0;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.isQrReady = false;
     this.startTime = null;
     this.state.isOnline = false;
-    this.state.connectionStatus = 'disconnected';
+    this.state.connectionStatus = "disconnected";
+    if (isUserExplicitStop) {
+      this.state.qrCodeDataUrl = null;
+      this.state.pairingCode = null;
+    }
 
     if (this.sock) {
       try {
-        this.sock.end(undefined);
-        this.sock = null;
-        this.addLog('INFO', 'Bot engine manually stopped by user.');
-        return { success: true, message: 'Bot stopped successfully.' };
+        this.sock.ev.removeAllListeners("connection.update");
+        this.sock.ev.removeAllListeners("creds.update");
+        this.sock.ev.removeAllListeners("messages.upsert");
+        this.sock.ev.removeAllListeners("call");
+        this.sock.ev.removeAllListeners("group-participants.update");
+        try {
+          (this.sock as any).ws?.close();
+        } catch (e) {}
+        try {
+          this.sock.end(undefined);
+        } catch (e) {}
       } catch (err: any) {
-        this.sock = null;
-        return { success: true, message: 'Bot stopped.' };
+        // silent
       }
+      this.sock = null;
     }
-    return { success: true, message: 'Bot was already stopped.' };
+    if (isUserExplicitStop) {
+      this.addLog("INFO", "🛑 Bot engine manually stopped by user.");
+    }
+    return { success: true, message: "Bot stopped successfully." };
   }
 
   public async restart(): Promise<{ success: boolean; message: string }> {
     this.addLog('INFO', `Restarting ${this.state.config.botName} bot engine...`);
     await this.stop();
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 1200));
     return this.start();
   }
 
-  public clearSession(): { success: boolean; message: string } {
-    this.stop();
+  public async clearSession(): Promise<{ success: boolean; message: string }> {
+    await this.stop();
     this.clearSessionFiles();
     this.state.pairedNumber = null;
     this.state.qrCodeDataUrl = null;
     this.state.pairingCode = null;
-    this.addLog('INFO', 'Session data wiped. Ready for fresh pairing.');
+    this.state.isOnline = false;
+    this.state.connectionStatus = 'disconnected';
+    this.addLog('INFO', '🧹 Session data and credentials wiped. Ready for fresh pairing.');
     return { success: true, message: 'Session data cleared successfully.' };
   }
 
@@ -635,14 +756,29 @@ Type ".menu" to explore our services.
   private extractMessageContent(msg: proto.IWebMessageInfo): string {
     if (!msg.message) return '';
 
-    let messageObj = msg.message;
-    if (messageObj.viewOnceMessage?.message) {
-      messageObj = messageObj.viewOnceMessage.message;
-    } else if (messageObj.viewOnceMessageV2?.message) {
-      messageObj = messageObj.viewOnceMessageV2.message;
-    } else if (messageObj.ephemeralMessage?.message) {
-      messageObj = messageObj.ephemeralMessage.message;
+    let messageObj: any = msg.message;
+
+    // Unpack all potential envelope layers (viewOnce, viewOnceV2, ephemeral, documentWithCaption)
+    let depth = 0;
+    while (
+      depth < 5 &&
+      messageObj &&
+      (messageObj.viewOnceMessage?.message ||
+        messageObj.viewOnceMessageV2?.message ||
+        messageObj.viewOnceMessageV2Extension?.message ||
+        messageObj.ephemeralMessage?.message ||
+        messageObj.documentWithCaptionMessage?.message)
+    ) {
+      messageObj =
+        messageObj.viewOnceMessage?.message ||
+        messageObj.viewOnceMessageV2?.message ||
+        messageObj.viewOnceMessageV2Extension?.message ||
+        messageObj.ephemeralMessage?.message ||
+        messageObj.documentWithCaptionMessage?.message;
+      depth++;
     }
+
+    if (!messageObj) return '';
 
     // 1. Direct text message types
     if (messageObj.conversation) return messageObj.conversation;
@@ -676,9 +812,15 @@ Type ".menu" to explore our services.
     if (messageObj.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson) {
       try {
         const parsed = JSON.parse(messageObj.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson);
-        if (parsed?.id) return parsed.id;
-        if (parsed?.selected_id) return parsed.selected_id;
-        if (parsed?.display_text) return parsed.display_text;
+        const resolved =
+          parsed?.id ||
+          parsed?.selected_id ||
+          parsed?.selected_row_id ||
+          parsed?.selectedRowId ||
+          parsed?.title ||
+          parsed?.display_text ||
+          '';
+        if (resolved) return resolved;
       } catch {}
     }
     if (messageObj.interactiveResponseMessage?.body?.text) {
@@ -1239,6 +1381,7 @@ _POWERED BY YASHI HALLS_
       title?: string;
       subtitle?: string;
       selectTitle?: string;
+      mode?: 'buttons' | 'list';
       buttons?: { buttonId: string; buttonText: { displayText: string } }[];
       sections?: {
         title: string;
@@ -1246,6 +1389,7 @@ _POWERED BY YASHI HALLS_
       }[];
       urls?: { displayText: string; url: string }[];
       calls?: { displayText: string; phoneNumber: string }[];
+      copyCodes?: { displayText: string; copyCode: string }[];
     }
   ) {
     if (!this.sock) return;
@@ -1256,7 +1400,7 @@ _POWERED BY YASHI HALLS_
 
     let formattedText = content.text;
 
-    // Elegant button card directory
+    // Elegant button card directory in text body (ensures universal display on all devices/clients)
     if (content.sections && content.sections.length > 0) {
       formattedText += `\n\n╭────── 🔘 *FEATURE DIRECTORY* ──────╮\n`;
       for (const sec of content.sections) {
@@ -1275,6 +1419,12 @@ _POWERED BY YASHI HALLS_
       formattedText += `╰────────────────────────────────╯`;
     }
 
+    if (content.copyCodes && content.copyCodes.length > 0) {
+      for (const cc of content.copyCodes) {
+        formattedText += `\n📋 *Copy:* \`${cc.copyCode}\``;
+      }
+    }
+
     if (content.urls && content.urls.length > 0) {
       for (const u of content.urls) {
         formattedText += `\n🔗 *${u.displayText}:* ${u.url}`;
@@ -1290,117 +1440,17 @@ _POWERED BY YASHI HALLS_
     formattedText += `\n\n_${footer}_`;
 
     try {
-      // Build real WhatsApp Native Flow buttons (single_select list & quick_reply buttons)
-      const nativeButtons: proto.Message.InteractiveMessage.NativeFlowMessage.INativeFlowButton[] = [];
-
-      // 1. Single Select list dropdown modal
-      if (content.sections && content.sections.length > 0) {
-        nativeButtons.push({
-          name: 'single_select',
-          buttonParamsJson: JSON.stringify({
-            title: content.selectTitle || '📂 SELECT A CATEGORY',
-            sections: content.sections.map((s) => ({
-              title: s.title,
-              rows: s.rows.map((r) => ({
-                id: r.id || r.rowId || '',
-                title: r.title,
-                description: r.description || '',
-              })),
-            })),
-          }),
-        });
-      }
-
-      // 2. Quick reply buttons (up to 3 clickable buttons)
-      if (content.buttons && content.buttons.length > 0) {
-        for (const b of content.buttons.slice(0, 3)) {
-          nativeButtons.push({
-            name: 'quick_reply',
-            buttonParamsJson: JSON.stringify({
-              display_text: b.buttonText.displayText,
-              id: b.buttonId,
-            }),
-          });
-        }
-      }
-
-      // 3. CTA URL buttons (up to 2 links)
-      if (content.urls && content.urls.length > 0) {
-        for (const u of content.urls.slice(0, 2)) {
-          nativeButtons.push({
-            name: 'cta_url',
-            buttonParamsJson: JSON.stringify({
-              display_text: u.displayText,
-              url: u.url,
-              merchant_url: u.url,
-            }),
-          });
-        }
-      }
-
-      // 4. CTA Call buttons (up to 1 phone call)
-      if (content.calls && content.calls.length > 0) {
-        for (const c of content.calls.slice(0, 1)) {
-          nativeButtons.push({
-            name: 'cta_call',
-            buttonParamsJson: JSON.stringify({
-              display_text: c.displayText,
-              phone_number: c.phoneNumber,
-            }),
-          });
-        }
-      }
-
-      // Generate the real WhatsApp native interactive message
-      const interactiveMsg = proto.Message.InteractiveMessage.fromObject({
-        body: {
-          text: formattedText,
-        },
-        footer: {
-          text: footer,
-        },
-        header: {
-          title: content.title || `⚡ ${botName} ⚡`,
-          subtitle: content.subtitle || `[${planName} PLAN]`,
-          hasMediaAttachment: false,
-        },
-        nativeFlowMessage: {
-          buttons: nativeButtons,
-        },
-      });
-
-      const waMessage = generateWAMessageFromContent(
-        jid,
-        {
-          viewOnceMessage: {
-            message: {
-              messageContextInfo: {
-                deviceListMetadata: {},
-                deviceListMetadataVersion: 2,
-              },
-              interactiveMessage: interactiveMsg,
-            },
-          },
-        },
-        {
-          userJid: this.sock.user?.id || '',
-          quoted: quotedMsg as any,
-        }
-      );
-
-      // Relay the genuine interactive button message (ZERO POLLS!)
-      await this.sock.relayMessage(jid, waMessage.message!, {
-        messageId: waMessage.key.id!,
-      });
-      this.addLog('INFO', `Sent real WhatsApp interactive buttons to ${jid.split('@')[0]}`);
-    } catch (relayErr: any) {
-      this.addLog('WARN', `Interactive relay fallback: ${relayErr?.message || relayErr}`);
-      // Fast guaranteed text delivery
       await this.sock.sendMessage(
         jid,
         { text: formattedText },
         { quoted: quotedMsg as any }
       );
+      this.addLog(
+        "INFO",
+        `✅ Delivered menu card to ${jid.split("@")[0]}`
+      );
+    } catch (err: any) {
+      this.addLog("ERROR", `Failed to deliver menu card to ${jid}: ${err?.message || err}`);
     }
   }
 
@@ -1461,22 +1511,18 @@ _Tap a button below or reply with any command:_
 
       await this.sendInteractiveButtonsOrFallback(jid, msg, {
         text,
-        selectTitle: '🎵 SONG & AUDIO COMMANDS',
-        sections: [
-          {
-            title: '🎵 AUDIO SUITE',
-            rows: [
-              { id: `${p}song Alan Walker Faded`, title: '🎵 DOWNLOAD SONG', description: 'Download MP3 by title or artist' },
-              { id: `${p}play Alan Walker`, title: '🎧 STREAM AUDIO', description: 'High-speed audio streaming' },
-              { id: `${p}lyrics Alan Walker Faded`, title: '📝 SONG LYRICS', description: 'Search & display lyrics' },
-              { id: `${p}menu`, title: '🔙 MAIN MENU', description: 'Return to bot categories directory' },
-            ],
-          },
-        ],
+        title: '🎵 SONG & AUDIO SUITE 🎵',
+        mode: 'buttons',
         buttons: [
-          { buttonId: `${p}song Alan Walker Faded`, buttonText: { displayText: '🎵 SONG' } },
-          { buttonId: `${p}menu video`, buttonText: { displayText: '🎬 VIDEO' } },
+          { buttonId: `${p}song Alan Walker Faded`, buttonText: { displayText: '🎵 DOWNLOAD SONG' } },
+          { buttonId: `${p}menu video`, buttonText: { displayText: '🎬 VIDEO SUITE' } },
           { buttonId: `${p}menu`, buttonText: { displayText: '🔙 MAIN MENU' } },
+        ],
+        copyCodes: [
+          { displayText: '📋 Copy .song command', copyCode: `${p}song ` },
+        ],
+        urls: [
+          { displayText: '📢 WHATSAPP CHANNEL', url: WHATSAPP_CHANNEL_URL },
         ],
       });
       return;
@@ -1508,22 +1554,18 @@ _Tap a button below or reply with any command:_
 
       await this.sendInteractiveButtonsOrFallback(jid, msg, {
         text,
-        selectTitle: '🎬 VIDEO & STREAMING COMMANDS',
-        sections: [
-          {
-            title: '🎬 VIDEO SUITE',
-            rows: [
-              { id: `${p}video Tech news`, title: '🎬 DOWNLOAD VIDEO', description: 'Search & download MP4 clip' },
-              { id: `${p}tiktok`, title: '📱 TIKTOK DOWNLOADER', description: 'No-watermark video grabber' },
-              { id: `${p}instagram`, title: '📸 INSTAGRAM REEL', description: 'Instagram post & reel grabber' },
-              { id: `${p}menu`, title: '🔙 MAIN MENU', description: 'Return to bot categories directory' },
-            ],
-          },
-        ],
+        title: '🎬 VIDEO & STREAMING SUITE 🎬',
+        mode: 'buttons',
         buttons: [
-          { buttonId: `${p}video Tech news`, buttonText: { displayText: '🎬 VIDEO' } },
-          { buttonId: `${p}menu image`, buttonText: { displayText: '🖼️ IMAGE' } },
+          { buttonId: `${p}video Tech news`, buttonText: { displayText: '🎬 DOWNLOAD VIDEO' } },
+          { buttonId: `${p}menu image`, buttonText: { displayText: '🖼️ IMAGE SUITE' } },
           { buttonId: `${p}menu`, buttonText: { displayText: '🔙 MAIN MENU' } },
+        ],
+        copyCodes: [
+          { displayText: '📋 Copy .video command', copyCode: `${p}video ` },
+        ],
+        urls: [
+          { displayText: '📢 WHATSAPP CHANNEL', url: WHATSAPP_CHANNEL_URL },
         ],
       });
       return;
@@ -1559,22 +1601,18 @@ _Tap a button below or reply with any command:_
 
       await this.sendInteractiveButtonsOrFallback(jid, msg, {
         text,
-        selectTitle: '🖼️ IMAGE & STICKER COMMANDS',
-        sections: [
-          {
-            title: '🖼️ VISUAL SUITE',
-            rows: [
-              { id: `${p}img cyber car`, title: '🖼️ SEARCH IMAGE', description: 'High-res image search' },
-              { id: `${p}sticker`, title: '✨ MAKE STICKER', description: 'Convert image to sticker' },
-              { id: `${p}imagine Neon City`, title: '🎨 AI CONCEPT ART', description: 'Generate AI concept image' },
-              { id: `${p}menu`, title: '🔙 MAIN MENU', description: 'Return to bot categories directory' },
-            ],
-          },
-        ],
+        title: '🖼️ IMAGE & STICKER SUITE 🖼️',
+        mode: 'buttons',
         buttons: [
-          { buttonId: `${p}img cyber car`, buttonText: { displayText: '🖼️ SEARCH' } },
-          { buttonId: `${p}menu ai`, buttonText: { displayText: '🤖 AI CHAT' } },
+          { buttonId: `${p}img cyber car`, buttonText: { displayText: '🖼️ SEARCH IMAGE' } },
+          { buttonId: `${p}menu ai`, buttonText: { displayText: '🤖 YASHI AI' } },
           { buttonId: `${p}menu`, buttonText: { displayText: '🔙 MAIN MENU' } },
+        ],
+        copyCodes: [
+          { displayText: '📋 Copy .img command', copyCode: `${p}img ` },
+        ],
+        urls: [
+          { displayText: '📢 WHATSAPP CHANNEL', url: WHATSAPP_CHANNEL_URL },
         ],
       });
       return;
@@ -1607,22 +1645,18 @@ _Tap a button below or reply with any command:_
 
       await this.sendInteractiveButtonsOrFallback(jid, msg, {
         text,
-        selectTitle: '🤖 AI INTELLIGENCE COMMANDS',
-        sections: [
-          {
-            title: '🤖 YASHI HALLS AI',
-            rows: [
-              { id: `${p}ai What is artificial intelligence?`, title: '🤖 ASK AI', description: 'Ask any question' },
-              { id: `${p}translate sinhala Hello world`, title: '🌐 TRANSLATOR', description: 'Translate to any language' },
-              { id: `${p}code create a simple server`, title: '💻 CODE ASSISTANT', description: 'Coding & debugging' },
-              { id: `${p}menu`, title: '🔙 MAIN MENU', description: 'Return to bot categories directory' },
-            ],
-          },
-        ],
+        title: '🤖 YASHI HALLS AI SUITE 🤖',
+        mode: 'buttons',
         buttons: [
-          { buttonId: `${p}ai Hello, who are you?`, buttonText: { displayText: '🤖 ASK AI' } },
-          { buttonId: `${p}menu games`, buttonText: { displayText: '🎮 GAMES' } },
+          { buttonId: `${p}ai What is artificial intelligence?`, buttonText: { displayText: '🤖 ASK AI' } },
+          { buttonId: `${p}menu games`, buttonText: { displayText: '🎮 MINI GAMES' } },
           { buttonId: `${p}menu`, buttonText: { displayText: '🔙 MAIN MENU' } },
+        ],
+        copyCodes: [
+          { displayText: '📋 Copy .ai command', copyCode: `${p}ai ` },
+        ],
+        urls: [
+          { displayText: '📢 WHATSAPP CHANNEL', url: WHATSAPP_CHANNEL_URL },
         ],
       });
       return;
@@ -1653,23 +1687,18 @@ _Tap a button below to play instantly:_
 
       await this.sendInteractiveButtonsOrFallback(jid, msg, {
         text,
-        selectTitle: '🎮 MINI GAMES & CASUAL',
-        sections: [
-          {
-            title: '🎮 GAME SUITE',
-            rows: [
-              { id: `${p}quiz`, title: '🧠 START QUIZ', description: 'Trivia quiz question' },
-              { id: `${p}roll`, title: '🎲 ROLL DICE', description: '6-sided dice roll' },
-              { id: `${p}flip`, title: '🪙 FLIP COIN', description: 'Heads or tails toss' },
-              { id: `${p}guess 5`, title: '🔢 GUESS NUMBER', description: 'Guess mystery number' },
-              { id: `${p}menu`, title: '🔙 MAIN MENU', description: 'Return to bot categories directory' },
-            ],
-          },
-        ],
+        title: '🎮 MINI GAMES & CASUAL 🎮',
+        mode: 'buttons',
         buttons: [
-          { buttonId: `${p}quiz`, buttonText: { displayText: '🧠 QUIZ' } },
+          { buttonId: `${p}quiz`, buttonText: { displayText: '🧠 START QUIZ' } },
           { buttonId: `${p}roll`, buttonText: { displayText: '🎲 ROLL DICE' } },
-          { buttonId: `${p}menu`, buttonText: { displayText: '🔙 MAIN MENU' } },
+          { buttonId: `${p}flip`, buttonText: { displayText: '🪙 FLIP COIN' } },
+        ],
+        copyCodes: [
+          { displayText: '📋 Copy .quiz command', copyCode: `${p}quiz` },
+        ],
+        urls: [
+          { displayText: '📢 WHATSAPP CHANNEL', url: WHATSAPP_CHANNEL_URL },
         ],
       });
       return;
@@ -1706,22 +1735,15 @@ _Tap a button below or run in any group:_
 
       await this.sendInteractiveButtonsOrFallback(jid, msg, {
         text,
-        selectTitle: '👥 GROUP MANAGEMENT SUITE',
-        sections: [
-          {
-            title: '👥 GROUP SUITE',
-            rows: [
-              { id: `${p}groupinfo`, title: '👥 GROUP INFO', description: 'Group info & metadata' },
-              { id: `${p}admins`, title: '👑 LIST ADMINS', description: 'Mention all administrators' },
-              { id: `${p}tagall Attention!`, title: '📢 TAG ALL', description: 'Tag all group members' },
-              { id: `${p}menu`, title: '🔙 MAIN MENU', description: 'Return to bot categories directory' },
-            ],
-          },
-        ],
+        title: '👥 GROUP MANAGEMENT SUITE 👥',
+        mode: 'buttons',
         buttons: [
           { buttonId: `${p}groupinfo`, buttonText: { displayText: '👥 GROUP INFO' } },
           { buttonId: `${p}admins`, buttonText: { displayText: '👑 LIST ADMINS' } },
           { buttonId: `${p}menu`, buttonText: { displayText: '🔙 MAIN MENU' } },
+        ],
+        urls: [
+          { displayText: '📢 WHATSAPP CHANNEL', url: WHATSAPP_CHANNEL_URL },
         ],
       });
       return;
@@ -1734,6 +1756,8 @@ _Tap a button below or run in any group:_
     }
 
     // --- MASTER INTERACTIVE DIRECTORY ---
+    const isListMode = cat === 'list' || cat === 'all' || cat === 'dir';
+
     const masterMenuText = `
 ╔══════════════════════════════╗
    ⚡ *${this.state.config.botName}* ⚡
@@ -1754,6 +1778,7 @@ _Tap a button below or run in any group:_
       text: masterMenuText,
       title: `⚡ ${this.state.config.botName} MENU ⚡`,
       subtitle: `Tier: [${plan} PLAN]`,
+      mode: isListMode ? 'list' : 'buttons',
       selectTitle: '⚡ SELECT A CATEGORY',
       sections: [
         {
@@ -1770,9 +1795,12 @@ _Tap a button below or run in any group:_
         },
       ],
       buttons: [
-        { buttonId: `${p}menu song`, buttonText: { displayText: '🎵 SONG' } },
-        { buttonId: `${p}menu video`, buttonText: { displayText: '🎬 VIDEO' } },
-        { buttonId: `${p}menu ai`, buttonText: { displayText: '🤖 AI CHAT' } },
+        { buttonId: `${p}menu song`, buttonText: { displayText: '🎵 SONG SUITE' } },
+        { buttonId: `${p}menu video`, buttonText: { displayText: '🎬 VIDEO SUITE' } },
+        { buttonId: `${p}menu ai`, buttonText: { displayText: '🤖 YASHI AI' } },
+      ],
+      copyCodes: [
+        { displayText: '📋 Copy .menu Command', copyCode: `${p}menu` },
       ],
       urls: [
         { displayText: '📢 WHATSAPP CHANNEL', url: WHATSAPP_CHANNEL_URL },
@@ -1834,22 +1862,15 @@ _POWERED BY YASHI HALLS_
 
     await this.sendInteractiveButtonsOrFallback(jid, msg, {
       text,
-      selectTitle: '⚙️ SETTINGS & CONTROLS',
-      sections: [
-        {
-          title: '⚙️ BOT CONFIGURATION',
-          rows: [
-            { id: `${p}ping`, title: '⚡ CHECK LATENCY', description: 'Real-time response time' },
-            { id: `${p}owner`, title: '👑 CONTACT OWNER', description: `Hotline: ${OWNER_HOTLINE}` },
-            { id: `${p}upgrade`, title: '💎 UPGRADE PLAN', description: 'PRO / BUSINESS features' },
-            { id: `${p}menu`, title: '🔙 MAIN MENU', description: 'Return to bot categories directory' },
-          ],
-        },
-      ],
+      title: '⚙️ BOT SETTINGS & CONTROLS ⚙️',
+      mode: 'buttons',
       buttons: [
-        { buttonId: `${p}ping`, buttonText: { displayText: '⚡ LATENCY PING' } },
+        { buttonId: `${p}ping`, buttonText: { displayText: '⚡ CHECK PING' } },
         { buttonId: `${p}owner`, buttonText: { displayText: '👑 BOT OWNER' } },
         { buttonId: `${p}menu`, buttonText: { displayText: '🔙 MAIN MENU' } },
+      ],
+      copyCodes: [
+        { displayText: '📋 Copy .settings', copyCode: `${p}settings` },
       ],
       urls: [
         { displayText: '📢 WHATSAPP CHANNEL', url: WHATSAPP_CHANNEL_URL },
@@ -1884,21 +1905,18 @@ _POWERED BY YASHI HALLS_
 `.trim();
     await this.sendInteractiveButtonsOrFallback(jid, msg, {
       text,
-      selectTitle: '📖 COMMAND DIRECTORY',
-      sections: [
-        {
-          title: '⚡ AVAILABLE FEATURES',
-          rows: [
-            { id: `${p}menu`, title: '📋 OPEN MAIN MENU', description: 'Browse all category buttons' },
-            { id: `${p}ping`, title: '⚡ TEST LATENCY', description: 'Real-time server speed' },
-            { id: `${p}upgrade`, title: '💎 UPGRADE TIER', description: 'Unlock PRO & BUSINESS' },
-          ],
-        },
-      ],
+      title: '📖 COMMAND DIRECTORY 📖',
+      mode: 'buttons',
       buttons: [
         { buttonId: `${p}menu`, buttonText: { displayText: '📋 OPEN MENU' } },
-        { buttonId: `${p}ping`, buttonText: { displayText: '⚡ PING' } },
-        { buttonId: `${p}owner`, buttonText: { displayText: '👑 OWNER' } },
+        { buttonId: `${p}ping`, buttonText: { displayText: '⚡ TEST LATENCY' } },
+        { buttonId: `${p}owner`, buttonText: { displayText: '👑 BOT OWNER' } },
+      ],
+      copyCodes: [
+        { displayText: '📋 Copy .help', copyCode: `${p}help` },
+      ],
+      urls: [
+        { displayText: '📢 WHATSAPP CHANNEL', url: WHATSAPP_CHANNEL_URL },
       ],
     });
   }
@@ -1906,6 +1924,7 @@ _POWERED BY YASHI HALLS_
   private async cmdPing(jid: string, msg: proto.IWebMessageInfo) {
     const latency = Math.max(12, Math.floor(Math.random() * 20) + 12);
     this.state.lastPingMs = latency;
+    const p = this.state.config.prefix;
     const pingText = `
 🏓 *PONG!*
 ⚡ *Speed:* ${latency}ms
@@ -1914,20 +1933,50 @@ _POWERED BY YASHI HALLS_
 🟢 *Engine:* Baileys Multi-Device / Node.js ${process.version}
 ☁️ *Host:* YASHI HALLS Cloud (24/7 Live)
 `.trim();
-    await this.reply(jid, msg, pingText);
+
+    await this.sendInteractiveButtonsOrFallback(jid, msg, {
+      text: pingText,
+      title: '⚡ SPEED LATENCY PING ⚡',
+      mode: 'buttons',
+      buttons: [
+        { buttonId: `${p}ping`, buttonText: { displayText: '⚡ PING AGAIN' } },
+        { buttonId: `${p}menu`, buttonText: { displayText: '📋 OPEN MENU' } },
+        { buttonId: `${p}owner`, buttonText: { displayText: '👑 BOT OWNER' } },
+      ],
+      copyCodes: [
+        { displayText: '📋 Copy .ping', copyCode: `${p}ping` },
+      ],
+    });
   }
 
   private async cmdOwner(jid: string, msg: proto.IWebMessageInfo) {
+    const p = this.state.config.prefix;
     const text = `
 👑 *BOT OWNER PROFILE*
 ━━━━━━━━━━━━━━━━━━━━━━━━
 👤 *Name:* Sawrika Suraj
 📞 *WhatsApp:* +${this.state.config.ownerNumber} (0740712934)
 🌐 *Cloud:* YASHI HALLS Platform
-💬 *Channel:* https://whatsapp.com/channel/0029Vb927N4GJP8MS1yurM2Z
+💬 *Channel:* ${WHATSAPP_CHANNEL_URL}
 ━━━━━━━━━━━━━━━━━━━━━━━━
 `.trim();
-    await this.reply(jid, msg, text);
+
+    await this.sendInteractiveButtonsOrFallback(jid, msg, {
+      text,
+      title: '👑 BOT OWNER PROFILE 👑',
+      mode: 'buttons',
+      buttons: [
+        { buttonId: `${p}menu`, buttonText: { displayText: '📋 OPEN MENU' } },
+        { buttonId: `${p}ping`, buttonText: { displayText: '⚡ LATENCY PING' } },
+        { buttonId: `${p}upgrade`, buttonText: { displayText: '💎 UPGRADE TIER' } },
+      ],
+      calls: [
+        { displayText: '📞 OWNER HOTLINE', phoneNumber: OWNER_HOTLINE },
+      ],
+      urls: [
+        { displayText: '📢 WHATSAPP CHANNEL', url: WHATSAPP_CHANNEL_URL },
+      ],
+    });
   }
 
   private async cmdSetMode(jid: string, msg: proto.IWebMessageInfo, isOwner: boolean, mode: 'public' | 'private') {

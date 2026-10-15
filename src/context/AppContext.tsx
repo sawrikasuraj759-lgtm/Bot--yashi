@@ -72,7 +72,7 @@ interface AppContextType {
   stopBot: () => Promise<{ success: boolean; message: string }>;
   restartBot: (id?: string) => Promise<void>;
   toggleBotState: (id?: string) => Promise<void>;
-  deleteBot: (id?: string) => void;
+  deleteBot: (id?: string) => Promise<void> | void;
   updateBotEnv: (id: string, env: Record<string, string>) => void;
   updateBotConfig: (config: Partial<ServerBotConfig>) => Promise<void>;
   clearSession: () => Promise<{ success: boolean; message: string }>;
@@ -532,17 +532,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const toggleBotState = async (id?: string) => {
     soundFX.playClick();
-    if (serverBotState?.isOnline) {
+    if (serverBotState && serverBotState.connectionStatus !== 'disconnected') {
       await stopBot();
     } else {
       await startBot();
     }
   };
 
-  const deleteBot = (id?: string) => {
-    stopBot();
-    clearSession();
-    addToast('Bot deployment removed and slot freed.', 'info');
+  const deleteBot = async (id?: string) => {
+    soundFX.playClick();
+    addToast('Stopping and deleting bot container...', 'info');
+    await stopBot();
+    await clearSession();
+    setPairingSession(null);
+    await refreshBotStatus();
+    addToast('Bot deployment completely removed and deleted.', 'success');
   };
 
   const updateBotEnv = (id: string, env: Record<string, string>) => {
@@ -645,19 +649,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Real QR Code Generator
-  const generateQrCode = async (): Promise<{ success: boolean; message: string }> => {
+  const generateQrCode = useCallback(async (): Promise<{ success: boolean; message: string }> => {
     try {
-      const res = await fetch('/api/bot/pair/qr', { method: 'POST' });
+      const res = await fetch("/api/bot/pair/qr", { method: "POST" });
       const data = await res.json();
       await refreshBotStatus();
-      setTimeout(async () => {
-        await refreshBotStatus();
-      }, 1500);
       return data;
     } catch (err: any) {
-      return { success: false, message: err?.message || 'Network error' };
+      return { success: false, message: err?.message || "Network error" };
     }
-  };
+  }, [refreshBotStatus]);
 
   const linkAndDeployPairedBot = async (customName?: string): Promise<{ success: boolean; message: string }> => {
     soundFX.playClick();

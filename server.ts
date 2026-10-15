@@ -15,6 +15,7 @@ import {
   validateAudioBuffer,
   formatBytes,
 } from './src/server/voiceService';
+import { normalizeWhatsAppNumber } from './src/utils/phone';
 
 dotenv.config();
 
@@ -78,7 +79,8 @@ async function startServer() {
   app.post('/api/bot/start', async (req: Request, res: Response) => {
     try {
       const { phoneNumber } = req.body || {};
-      const result = await botEngine.start(phoneNumber);
+      const cleanPhone = phoneNumber ? normalizeWhatsAppNumber(phoneNumber) : undefined;
+      const result = await botEngine.start(cleanPhone);
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ success: false, message: err?.message || 'Failed to start bot' });
@@ -113,11 +115,8 @@ async function startServer() {
         return res.status(400).json({ success: false, message: 'Phone number is required.' });
       }
 
-      let cleanPhone = String(phoneNumber).replace(/\D/g, '');
-      if (cleanPhone.startsWith('0') && cleanPhone.length === 10) {
-        cleanPhone = '94' + cleanPhone.slice(1);
-      }
-      if (cleanPhone.length < 8) {
+      const cleanPhone = normalizeWhatsAppNumber(phoneNumber);
+      if (!cleanPhone || cleanPhone.length < 8) {
         return res.status(400).json({
           success: false,
           message: 'Invalid phone number format. Enter e.g. 0740712934 or 94740712934.',
@@ -134,17 +133,17 @@ async function startServer() {
   // Request QR Code pairing mode
   app.post('/api/bot/pair/qr', async (req: Request, res: Response) => {
     try {
-      await botEngine.start();
-      res.json({ success: true, message: 'QR Code generation initiated.' });
+      const result = await botEngine.generateQrCode();
+      res.json(result);
     } catch (err: any) {
       res.status(500).json({ success: false, message: err?.message || 'Failed to generate QR Code' });
     }
   });
 
   // Clear Session & Credentials for clean re-pairing
-  app.post('/api/bot/clear-session', (req: Request, res: Response) => {
+  app.post('/api/bot/clear-session', async (req: Request, res: Response) => {
     try {
-      const result = botEngine.clearSession();
+      const result = await botEngine.clearSession();
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ success: false, message: err?.message || 'Failed to clear session' });
@@ -882,9 +881,21 @@ async function startServer() {
     });
   }
 
-  app.listen(Number(PORT), '0.0.0.0', () => {
+  app.listen(Number(PORT), "0.0.0.0", () => {
     console.log(`🚀 [YASHI HALLS SERVER] Running on port ${PORT} (http://localhost:${PORT})`);
     console.log(`🤖 [BOT ENGINE] Ready to pair and host WhatsApp Multi-Device instance.`);
+
+    // Auto-resume WhatsApp bot if existing paired session credentials exist
+    const sessionDir = path.resolve(process.cwd(), "data", "whatsapp_session");
+    if (fs.existsSync(sessionDir)) {
+      const files = fs.readdirSync(sessionDir);
+      if (files.some((f) => f.includes("creds.json"))) {
+        console.log("🔄 [BOT ENGINE] Existing session credentials found. Auto-starting WhatsApp connection...");
+        botEngine.start().catch((err) => {
+          console.warn("Bot auto-start notice:", err?.message || err);
+        });
+      }
+    }
   });
 }
 
